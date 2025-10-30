@@ -454,25 +454,28 @@ def add_termini_distance_loss(self, weight=0.1, threshold_distance=7.0):
 # Define ipSAE loss for colabdesign
 def add_ipsae_loss(model, advanced_settings):
     if advanced_settings["weights_ipsae_d0res_asym"] > 0:
-        model.add_callback("loss", "ipsae_d0res_asym",
-            lambda i, o: ipsae_d0res_asym_loss(i, o,
-                                              align_chain=advanced_settings["align_chain"],
-                                              score_chain=advanced_settings["score_chain"],
-                                              pae_cutoff=advanced_settings["pae_cutoff"]))
+        loss_fn = lambda i, o: {"ipsae_d0res_asym": ipsae_d0res_asym_loss(i, o,
+                                                                          align_chain=advanced_settings["align_chain"],
+                                                                          score_chain=advanced_settings["score_chain"],
+                                                                          pae_cutoff=advanced_settings["pae_cutoff"])}
+        model._callbacks["model"]["loss"].append(loss_fn)
+        model.opt["weights"]["ipsae_d0res_asym"] = advanced_settings["weights_ipsae_d0res_asym"]
 
     if advanced_settings["weights_ipsae_d0chn_asym"] > 0:
-        model.add_callback("loss", "ipsae_d0chn_asym",
-            lambda i, o: ipsae_d0chn_asym_loss(i, o,
-                                              align_chain=advanced_settings["align_chain"],
-                                              score_chain=advanced_settings["score_chain"],
-                                              pae_cutoff=advanced_settings["pae_cutoff"]))
+        loss_fn = lambda i, o: {"ipsae_d0chn_asym": ipsae_d0chn_asym_loss(i, o,
+                                                                          align_chain=advanced_settings["align_chain"],
+                                                                          score_chain=advanced_settings["score_chain"],
+                                                                          pae_cutoff=advanced_settings["pae_cutoff"])}
+        model._callbacks["model"]["loss"].append(loss_fn)
+        model.opt["weights"]["ipsae_d0chn_asym"] = advanced_settings["weights_ipsae_d0chn_asym"]
 
     if advanced_settings["weights_ipsae_d0dom_asym"] > 0:
-        model.add_callback("loss", "ipsae_d0dom_asym",
-            lambda i, o: ipsae_d0dom_asym_loss(i, o,
-                                              align_chain=advanced_settings["align_chain"],
-                                              score_chain=advanced_settings["score_chain"],
-                                              pae_cutoff=advanced_settings["pae_cutoff"]))
+        loss_fn = lambda i, o: {"ipsae_d0dom_asym": ipsae_d0dom_asym_loss(i, o,
+                                                                          align_chain=advanced_settings["align_chain"],
+                                                                          score_chain=advanced_settings["score_chain"],
+                                                                          pae_cutoff=advanced_settings["pae_cutoff"])}
+        model._callbacks["model"]["loss"].append(loss_fn)
+        model.opt["weights"]["ipsae_d0dom_asym"] = advanced_settings["weights_ipsae_d0dom_asym"]
 
 # plot design trajectory losses
 def plot_trajectory(af_model, design_name, design_paths):
