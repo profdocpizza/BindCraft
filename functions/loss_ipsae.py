@@ -24,21 +24,24 @@ def ipsae_d0res_asym_loss(inputs, outputs, align_chain="A", score_chain="B", pae
     # Ensure inputs["asym_id"] is a JAX array for efficient processing
     chains = _jnp.asarray(inputs["asym_id"])
 
-    # Create boolean masks for the specified chains
-    mask_align = (chains == ord(align_chain.upper()))
-    mask_score = (chains == ord(score_chain.upper()))
+    # Create a mapping from chain letters to integer indices
+    chain_map = {chr(ord('A') + i): i for i in range(26)}
 
-    # Calculate d0, a scaling factor based on chain lengths
-    num_align = mask_align.sum()
-    num_score = mask_score.sum()
+    # Create boolean masks for the specified chains
+    mask_align = (chains == chain_map[align_chain.upper()])
+    mask_score = (chains == chain_map[score_chain.upper()])
+
+    # Calculate d0, a scaling factor based on chain lengths, summing over the correct axis
+    num_align = mask_align.sum(axis=-1)
+    num_score = mask_score.sum(axis=-1)
     d0 = _calc_d0_array(num_align + num_score, "protein")
 
-    # Calculate ptm, a score based on the PAE and d0
-    ptm = 1.0 / (1.0 + (pae / d0) ** 2)
+    # Calculate ptm, a score based on the PAE and d0, ensuring correct broadcasting
+    ptm = 1.0 / (1.0 + (pae / d0[:, None, None]) ** 2)
 
     # Create a 2D mask to select valid interactions
     # Valid interactions are between the align chain and the score chain, where PAE is below the cutoff
-    valid_mask = (mask_align[:, None] & mask_score[None, :]) & (pae < pae_cutoff)
+    valid_mask = (mask_align[:, :, None] & mask_score[:, None, :]) & (pae < pae_cutoff)
 
     # Apply the mask to the ptm matrix, zeroing out invalid entries
     masked_ptm = _jnp.where(valid_mask, ptm, 0)
