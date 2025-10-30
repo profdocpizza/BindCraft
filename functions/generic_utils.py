@@ -187,9 +187,9 @@ def load_helicity(advanced_settings):
     if advanced_settings["random_helicity"] is True:
         # will sample a random bias towards helicity
         helicity_value = round(np.random.uniform(-3, 1),2)
-    elif advanced_settings["weights_helicity"] != 0:
+    elif advanced_settings["weights"]["helicity"] != 0:
         # using a preset helicity bias
-        helicity_value = advanced_settings["weights_helicity"]
+        helicity_value = advanced_settings["weights"]["helicity"]
     else:
         # no bias towards helicity
         helicity_value = 0

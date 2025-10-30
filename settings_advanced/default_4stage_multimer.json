@@ -17,11 +17,21 @@
     "greedy_percentage": 1,
     "save_design_animations": true,
     "save_design_trajectory_plots": true,
-    "weights_plddt": 0.1,
-    "weights_pae_intra": 0.4,
-    "weights_pae_inter": 0.1,
-    "weights_con_intra": 1.0,
-    "weights_con_inter": 1.0,
+    "weights": {
+        "ipsae_d0res_asym": 1.0,
+        "ipsae_d0chn_asym": 0.0,
+        "ipsae_d0dom_asym": 0.0,
+        "plddt": 0.1,
+        "pae_intra": 0.4,
+        "pae_inter": 0.1,
+        "con_intra": 1.0,
+        "con_inter": 1.0
+    },
+    "ipsae": {
+        "align_chain": "A",
+        "score_chain": "B",
+        "pae_cutoff": 10.0
+    },
     "intra_contact_distance": 14.0,
     "inter_contact_distance": 20.0,
     "intra_contact_number": 2,

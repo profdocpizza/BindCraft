@@ -16,6 +16,7 @@ from colabdesign.shared.utils import copy_dict
 from .biopython_utils import hotspot_residues, calculate_clash_score, calc_ss_percentage, calculate_percentages
 from .pyrosetta_utils import pr_relax, align_pdbs
 from .generic_utils import update_failures
+from .loss_ipsae import ipsae_d0res_asym_loss, ipsae_d0chn_asym_loss, ipsae_d0dom_asym_loss
 
 # hallucinate a binder
 def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residues, length, seed, helicity_value, design_models, advanced_settings, design_paths, failure_csv):
@@ -37,11 +38,11 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
                         rm_target_seq=advanced_settings["rm_template_seq_design"], rm_target_sc=advanced_settings["rm_template_sc_design"])
 
     ### Update weights based on specified settings
-    af_model.opt["weights"].update({"pae":advanced_settings["weights_pae_intra"],
-                                    "plddt":advanced_settings["weights_plddt"],
-                                    "i_pae":advanced_settings["weights_pae_inter"],
-                                    "con":advanced_settings["weights_con_intra"],
-                                    "i_con":advanced_settings["weights_con_inter"],
+    af_model.opt["weights"].update({"pae":advanced_settings["weights"]["pae_intra"],
+                                    "plddt":advanced_settings["weights"]["plddt"],
+                                    "i_pae":advanced_settings["weights"]["pae_inter"],
+                                    "con":advanced_settings["weights"]["con_intra"],
+                                    "i_con":advanced_settings["weights"]["con_inter"],
                                     })
 
     # redefine intramolecular contacts (con) and intermolecular contacts (i_con) definitions
@@ -52,18 +53,21 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
     ### additional loss functions
     if advanced_settings["use_rg_loss"]:
         # radius of gyration loss
-        add_rg_loss(af_model, advanced_settings["weights_rg"])
+        add_rg_loss(af_model, advanced_settings["weights"]["rg"])
 
     if advanced_settings["use_i_ptm_loss"]:
         # interface pTM loss
-        add_i_ptm_loss(af_model, advanced_settings["weights_iptm"])
+        add_i_ptm_loss(af_model, advanced_settings["weights"]["iptm"])
 
     if advanced_settings["use_termini_distance_loss"]:
         # termini distance loss
-        add_termini_distance_loss(af_model, advanced_settings["weights_termini_loss"])
+        add_termini_distance_loss(af_model, advanced_settings["weights"]["termini_loss"])
 
     # add the helicity loss
     add_helix_loss(af_model, helicity_value)
+
+    # add ipSAE loss
+    add_ipsae_loss(af_model, advanced_settings)
 
     # calculate the number of mutations to do based on the length of the protein
     greedy_tries = math.ceil(length * (advanced_settings["greedy_percentage"] / 100))
@@ -446,6 +450,29 @@ def add_termini_distance_loss(self, weight=0.1, threshold_distance=7.0):
     # Append the loss function to the model callbacks
     self._callbacks["model"]["loss"].append(loss_fn)
     self.opt["weights"]["NC"] = weight
+
+# Define ipSAE loss for colabdesign
+def add_ipsae_loss(model, advanced_settings):
+    if advanced_settings["weights"]["ipsae_d0res_asym"] > 0:
+        model.add_callback("loss", "ipsae_d0res_asym",
+            lambda i, o: ipsae_d0res_asym_loss(i, o,
+                                              align_chain=advanced_settings["ipsae"]["align_chain"],
+                                              score_chain=advanced_settings["ipsae"]["score_chain"],
+                                              pae_cutoff=advanced_settings["ipsae"]["pae_cutoff"]))
+
+    if advanced_settings["weights"]["ipsae_d0chn_asym"] > 0:
+        model.add_callback("loss", "ipsae_d0chn_asym",
+            lambda i, o: ipsae_d0chn_asym_loss(i, o,
+                                              align_chain=advanced_settings["ipsae"]["align_chain"],
+                                              score_chain=advanced_settings["ipsae"]["score_chain"],
+                                              pae_cutoff=advanced_settings["ipsae"]["pae_cutoff"]))
+
+    if advanced_settings["weights"]["ipsae_d0dom_asym"] > 0:
+        model.add_callback("loss", "ipsae_d0dom_asym",
+            lambda i, o: ipsae_d0dom_asym_loss(i, o,
+                                              align_chain=advanced_settings["ipsae"]["align_chain"],
+                                              score_chain=advanced_settings["ipsae"]["score_chain"],
+                                              pae_cutoff=advanced_settings["ipsae"]["pae_cutoff"]))
 
 # plot design trajectory losses
 def plot_trajectory(af_model, design_name, design_paths):
