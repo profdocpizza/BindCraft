@@ -30,7 +30,7 @@ def ipsae_d0res_asym_loss(inputs, outputs, align_chain="A", score_chain="B", pae
     if not vals:
         return 0.0
 
-    ipSAE = _jnp.mean(_jnp.array(vals))
+    ipSAE = _jnp.max(_jnp.array(vals))
     return -ipSAE
 
 def ipsae_d0chn_asym_loss(inputs, outputs, align_chain="A", score_chain="B", pae_cutoff=10.0):
