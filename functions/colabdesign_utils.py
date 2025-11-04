@@ -450,65 +450,199 @@ def add_termini_distance_loss(self, weight=0.1, threshold_distance=7.0):
     self._callbacks["model"]["loss"].append(loss_fn)
     self.opt["weights"]["NC"] = weight
 
+# import jax
+# import jax.numpy as jnp
+# from colabdesign.af.loss import get_pae, get_dgram_bins, mask_loss
+
+# def get_ipsae_d0res_loss(inputs, outputs,
+#                          mask_target=None, mask_binder=None,
+#                          pae_cut=10.0, dist_cut=10.0,
+#                          pair_type="protein"):
+#     """
+#     Asymmetric ipSAE_d0res loss (align on target, score binder).
+#     Fully JAX-differentiable, AFDesign-compatible.
+#     """
+
+#     # 1. Predicted pairwise aligned error
+#     pae = get_pae(outputs)  # shape [L, L]
+
+#     # 2. Predicted distances from distogram
+#     dist_bins = get_dgram_bins(outputs)
+#     dist_probs = jax.nn.softmax(outputs["distogram"]["logits"], axis=-1)
+#     pred_dist = (dist_probs * dist_bins).sum(-1)  # [L, L]
+
+#     L = pae.shape[0]
+#     if mask_target is None: mask_target = jnp.ones(L)
+#     if mask_binder is None: mask_binder = jnp.ones(L)
+
+#     # 3. Asymmetric target→binder mask
+#     # ORIGINAL binary mask version
+#     # mask_2d = (mask_target[:, None] * mask_binder[None, :]).astype(bool)
+#     # mask_2d = mask_2d & (pred_dist < dist_cut) & (pae < pae_cut)
+
+#     ##### soft thresholds rather than binary masks
+#     k = 1.0  # steepness of sigmoid
+#     dist_w = jax.nn.sigmoid((dist_cut - pred_dist) * k)
+#     pae_w  = jax.nn.sigmoid((pae_cut - pae) * k)
+#     mask_2d = mask_target[:,None] * mask_binder[None,:] * dist_w * pae_w
+#     ##### soft thresholds rather than binary masks
+
+#     # 4. Compute n0res_byres = # of valid target→binder pairs per target residue
+#     n0res_byres = mask_2d.sum(-1) + 1e-8  # avoid 0 for d0 calc
+
+#     # 5. Compute d0res_byres according to TMscore scaling
+#     def calc_d0(L, pair_type):
+#         L = jnp.maximum(L, 27.0)
+#         min_value = jnp.where(pair_type == "nucleic_acid", 2.0, 1.0)
+#         return jnp.maximum(min_value, 1.24 * (L - 15.0) ** (1.0 / 3.0) - 1.8)
+
+#     d0res_byres = calc_d0(n0res_byres, pair_type)
+
+#     # 6. PTM-like transform
+#     ptm_like = 1.0 / (1.0 + (pae / d0res_byres[:, None]) ** 2)
+
+#     # 7. Apply asymmetric mask
+#     ipsae_mat = ptm_like * mask_2d
+
+#     # 8. Average over valid asymmetric pairs
+#     ipsae_value = ipsae_mat.sum() / (mask_2d.sum() + 1e-8)
+
+#     # 9. Return *loss* form (minimize 1 - ipsae)
+#     return 1.0 - ipsae_value
+
+
+# def add_ipsae_loss(model, weight=0.1):
+#     """
+#     Add asymmetric ipSAE_d0res loss to AFDesign binder protocol.
+#     """
+#     def loss_fn(inputs, outputs):
+#         opt = inputs["opt"]
+#         tL, bL = model._target_len, model._binder_len
+#         zeros = jnp.zeros(tL + bL)
+
+#         # construct 1D target/binder masks
+#         mask_target = zeros.at[:tL].set(1.0)
+#         mask_binder = zeros.at[-bL:].set(1.0)
+
+#         loss_val = get_ipsae_d0res_loss(
+#             inputs,
+#             outputs,
+#             mask_target=mask_target,
+#             mask_binder=mask_binder,
+#             pae_cut=opt.get("pae_cutoff", 10.0),
+#             dist_cut=opt.get("dist_cutoff", 10.0),
+#         )
+
+#         # ✅ return dict, not modify aux directly
+#         return {"ipsae_d0res": loss_val}
+
+#     model._callbacks["model"]["loss"].append(loss_fn)
+#     model.opt["weights"]["ipsae_d0res"] = weight
+
 import jax
 import jax.numpy as jnp
 from colabdesign.af.loss import get_pae, get_dgram_bins, mask_loss
 
+def safe_percentile(x, mask, q):
+    """
+    JAX-compatible masked percentile.
+    Returns approximate percentile q (0–100) of x[mask == True].
+    """
+    # Replace invalid values with +inf so they sort to the end
+    masked_x = jnp.where(mask, x, jnp.inf)
+    sorted_x = jnp.sort(masked_x)
+    n_valid = jnp.sum(mask)
+    # compute target index (clipped)
+    k = jnp.clip((q / 100.0) * (n_valid - 1), 0, n_valid - 1)
+    k_int = jnp.floor(k).astype(int)
+    return sorted_x[k_int]
+
+import jax
+import jax.numpy as jnp
+from colabdesign.af.loss import get_pae, get_dgram_bins
+
 def get_ipsae_d0res_loss(inputs, outputs,
                          mask_target=None, mask_binder=None,
-                         pae_cut=10.0, dist_cut=10.0,
-                         pair_type="protein"):
+                         base_pae_cut=10.0, base_dist_cut=10.0,
+                         pair_type="protein", min_frac=0.08):
     """
-    Asymmetric ipSAE_d0res loss (align on target, score binder).
-    Fully JAX-differentiable, AFDesign-compatible.
+    Adaptive, lenient ipSAE_d0res loss.
+    - ensures at least ~8% of pairs contribute
+    - adaptive thresholds based on observed PAE/dist distributions
+    - smooth fallback weighting for very bad regions
     """
 
-    # 1. Predicted pairwise aligned error
-    pae = get_pae(outputs)  # shape [L, L]
-
-    # 2. Predicted distances from distogram
+    pae = get_pae(outputs)  # [L, L]
     dist_bins = get_dgram_bins(outputs)
     dist_probs = jax.nn.softmax(outputs["distogram"]["logits"], axis=-1)
-    pred_dist = (dist_probs * dist_bins).sum(-1)  # [L, L]
+    pred_dist = (dist_probs * dist_bins).sum(-1)
 
     L = pae.shape[0]
     if mask_target is None: mask_target = jnp.ones(L)
     if mask_binder is None: mask_binder = jnp.ones(L)
 
-    # 3. Asymmetric target→binder mask
-    # ORIGINAL binary mask version
-    # mask_2d = (mask_target[:, None] * mask_binder[None, :]).astype(bool)
-    # mask_2d = mask_2d & (pred_dist < dist_cut) & (pae < pae_cut)
+    # --- pair mask: only target→binder ---
+    mask_2d = mask_target[:, None] * mask_binder[None, :]
 
-    ##### soft thresholds rather than binary masks
-    k = 1.0  # steepness of sigmoid
-    dist_w = jax.nn.sigmoid((dist_cut - pred_dist) * k)
-    pae_w  = jax.nn.sigmoid((pae_cut - pae) * k)
-    mask_2d = mask_target[:,None] * mask_binder[None,:] * dist_w * pae_w
-    ##### soft thresholds rather than binary masks
+    # flatten masked arrays
+    all_pae = jnp.where(mask_2d > 0, pae, jnp.inf).flatten()
+    all_dist = jnp.where(mask_2d > 0, pred_dist, jnp.inf).flatten()
 
-    # 4. Compute n0res_byres = # of valid target→binder pairs per target residue
-    n0res_byres = mask_2d.sum(-1) + 1e-8  # avoid 0 for d0 calc
+    # --- safe masked percentile helper ---
+    def safe_percentile(x, mask, q):
+        masked_x = jnp.where(mask, x, jnp.inf)
+        sorted_x = jnp.sort(masked_x)
+        n_valid = jnp.sum(mask)
+        k = jnp.clip((q / 100.0) * (n_valid - 1), 0, n_valid - 1)
+        k_int = jnp.floor(k).astype(int)
+        return sorted_x[k_int]
 
-    # 5. Compute d0res_byres according to TMscore scaling
-    def calc_d0(L, pair_type):
-        L = jnp.maximum(L, 27.0)
-        min_value = jnp.where(pair_type == "nucleic_acid", 2.0, 1.0)
-        return jnp.maximum(min_value, 1.24 * (L - 15.0) ** (1.0 / 3.0) - 1.8)
+    valid_mask = jnp.isfinite(all_pae)
+    n_valid = jnp.sum(valid_mask)
+    # adapt percentile so that roughly min_frac of all valid pairs pass
+    quantile = 100.0 * (1.0 - min_frac)
 
+    adaptive_pae_cut = jnp.maximum(
+        1.0,
+        jnp.minimum(
+            base_pae_cut * 5.0,
+            safe_percentile(all_pae, valid_mask, quantile)
+        ),
+    )
+    adaptive_dist_cut = jnp.maximum(
+        5.0,
+        jnp.minimum(
+            base_dist_cut * 3.0,
+            safe_percentile(all_dist, valid_mask, quantile)
+        ),
+    )
+
+    # --- soft weights (very smooth) ---
+    k = 0.15  # very shallow slope for leniency
+    dist_w = jax.nn.sigmoid((adaptive_dist_cut - pred_dist) * k)
+    pae_w  = jax.nn.sigmoid((adaptive_pae_cut - pae) * k)
+
+    # combine + floor weight (avoid zeroing everything)
+    soft_mask = mask_2d * (0.4 * dist_w + 0.6 * pae_w)
+    soft_mask = jnp.clip(soft_mask + 0.05, 0.0, 1.0)  # floor to keep weak signal
+
+    # --- compute d0res_byres scaling ---
+    n0res_byres = soft_mask.sum(-1) + 1e-8
+    def calc_d0(Lres, pair_type):
+        Lres = jnp.maximum(Lres, 27.0)
+        min_val = jnp.where(pair_type == "nucleic_acid", 2.0, 1.0)
+        return jnp.maximum(min_val, 1.24 * (Lres - 15.0) ** (1.0 / 3.0) - 1.8)
     d0res_byres = calc_d0(n0res_byres, pair_type)
 
-    # 6. PTM-like transform
-    ptm_like = 1.0 / (1.0 + (pae / d0res_byres[:, None]) ** 2)
+    # --- smoother PTM-like transform ---
+    scale_factor = 2.5  # smaller = smoother, more forgiving
+    ptm_like = 1.0 / (1.0 + ((pae * scale_factor) / d0res_byres[:, None]) ** 2)
 
-    # 7. Apply asymmetric mask
-    ipsae_mat = ptm_like * mask_2d
+    ipsae_mat = ptm_like * soft_mask
+    ipsae_value = ipsae_mat.sum() / (soft_mask.sum() + 1e-8)
 
-    # 8. Average over valid asymmetric pairs
-    ipsae_value = ipsae_mat.sum() / (mask_2d.sum() + 1e-8)
-
-    # 9. Return *loss* form (minimize 1 - ipsae)
     return 1.0 - ipsae_value
+
 
 
 def add_ipsae_loss(model, weight=0.1):
@@ -524,132 +658,24 @@ def add_ipsae_loss(model, weight=0.1):
         mask_target = zeros.at[:tL].set(1.0)
         mask_binder = zeros.at[-bL:].set(1.0)
 
-        loss_val = get_ipsae_d0res_loss(
+        ipsae_loss  = get_ipsae_d0res_loss(
             inputs,
             outputs,
             mask_target=mask_target,
             mask_binder=mask_binder,
-            pae_cut=opt.get("pae_cutoff", 10.0),
-            dist_cut=opt.get("dist_cutoff", 10.0),
+            base_pae_cut=opt.get("pae_cutoff", 10.0),
+            base_dist_cut=opt.get("dist_cutoff", 10.0),
         )
 
         # ✅ return dict, not modify aux directly
-        return {"ipsae_d0res": loss_val}
+        ipsae_score = 1.0 - ipsae_loss
+        return {
+            "ipsae_d0res": ipsae_loss,          # what AFDesign minimizes
+            "ipsae_d0res_score": ipsae_score    # for logging/debugging
+        }
 
     model._callbacks["model"]["loss"].append(loss_fn)
     model.opt["weights"]["ipsae_d0res"] = weight
-
-#TODO: try below : more smooth gradient
-# import jax
-# import jax.numpy as jnp
-
-# def get_ipsae_d0res_loss(
-#     inputs,
-#     outputs,
-#     mask_target=None,
-#     mask_binder=None,
-#     pae_cut_start=25.0,
-#     pae_cut_end=10.0,
-#     dist_cut_start=15.0,
-#     dist_cut_end=8.0,
-#     anneal_frac=0.5,
-#     pair_type="protein",
-#     topk_frac=0.2,
-#     step=None,
-#     total_steps=None,
-# ):
-#     """
-#     Asymmetric ipSAE_d0res loss (align on target, score binder).
-#     Revised continuous version for stable gradients.
-
-#     - Aligns on target residues (rows), scores binder residues (cols)
-#     - Uses smooth weighting instead of hard thresholds
-#     - Anneals cutoffs as design progresses
-#     - Aggregates over top-k best residues to preserve signal early
-#     """
-
-#     pae = get_pae(outputs)  # [L, L]
-#     dist_bins = get_dgram_bins(outputs)
-#     dist_probs = jax.nn.softmax(outputs["distogram"]["logits"], axis=-1)
-#     pred_dist = (dist_probs * dist_bins).sum(-1)  # [L, L]
-
-#     L = pae.shape[0]
-#     if mask_target is None: mask_target = jnp.ones(L)
-#     if mask_binder is None: mask_binder = jnp.ones(L)
-
-#     # --- dynamic cutoff annealing ---
-#     if step is None or total_steps is None:
-#         frac = 1.0
-#     else:
-#         frac = jnp.clip(step / (total_steps * anneal_frac), 0.0, 1.0)
-#     pae_cut = pae_cut_start + frac * (pae_cut_end - pae_cut_start)
-#     dist_cut = dist_cut_start + frac * (dist_cut_end - dist_cut_start)
-
-#     # --- soft interface weights ---
-#     # gentler slope (~0.2–0.3) keeps gradient alive
-#     k = 0.25
-#     pae_w = jnp.exp(-((pae / pae_cut) ** 2))
-#     dist_w = jax.nn.sigmoid((dist_cut - pred_dist) * k)
-#     mask_soft = mask_target[:, None] * mask_binder[None, :]
-#     w2d = mask_soft * pae_w * dist_w  # [target, binder]
-
-#     # --- dynamic residue-wise d0 scaling ---
-#     n0res_byres = (w2d > 0.01).sum(-1) + 1e-8
-
-#     def calc_d0(Lres, pair_type):
-#         Lres = jnp.maximum(Lres, 27.0)
-#         min_val = jnp.where(pair_type == "nucleic_acid", 2.0, 1.0)
-#         return jnp.maximum(min_val, 1.24 * (Lres - 15.0) ** (1.0 / 3.0) - 1.8)
-
-#     d0res_byres = calc_d0(n0res_byres, pair_type)
-
-#     # --- PTM-like transform ---
-#     ptm_like = 1.0 / (1.0 + (pae / d0res_byres[:, None]) ** 2)
-
-#     # --- weighted asymmetric matrix ---
-#     ipsae_mat = ptm_like * w2d
-
-#     # --- per-target residue scores ---
-#     score_per_target = ipsae_mat.sum(-1) / (w2d.sum(-1) + 1e-8)
-
-#     # --- top-k aggregation (preserve strong patches) ---
-#     k = jnp.maximum(1, int(topk_frac * L))
-#     top_scores = jnp.sort(score_per_target)[-k:]
-#     ipsae_value = top_scores.mean()
-
-#     # --- final loss ---
-#     return 1.0 - ipsae_value
-
-# def add_ipsae_loss(model, weight=0.1):
-#     """
-#     Add asymmetric ipSAE_d0res loss (align on target, score binder)
-#     to an AFDesign/BindCraft model.
-#     """
-#     def loss_fn(inputs, outputs):
-#         opt = inputs["opt"]
-#         tL, bL = model._target_len, model._binder_len
-#         zeros = jnp.zeros(tL + bL)
-#         mask_target = zeros.at[:tL].set(1.0)
-#         mask_binder = zeros.at[-bL:].set(1.0)
-
-#         step = inputs.get("step", 0)
-#         total_steps = inputs.get("total_steps", 1000)
-
-#         val = get_ipsae_d0res_loss(
-#             inputs, outputs,
-#             mask_target=mask_target,
-#             mask_binder=mask_binder,
-#             pae_cut_start=opt.get("pae_cut_start", 25.0),
-#             pae_cut_end=opt.get("pae_cut_end", 10.0),
-#             dist_cut_start=opt.get("dist_cut_start", 15.0),
-#             dist_cut_end=opt.get("dist_cut_end", 8.0),
-#             step=step,
-#             total_steps=total_steps,
-#         )
-#         return {"ipsae_d0res": val}
-
-#     model._callbacks["model"]["loss"].append(loss_fn)
-#     model.opt["weights"]["ipsae_d0res"] = weight
 
 
 # plot design trajectory losses
