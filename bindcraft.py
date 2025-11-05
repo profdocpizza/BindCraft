@@ -106,9 +106,16 @@ while True:
         print("Starting trajectory: "+design_name)
 
         ### Begin binder hallucination
-        trajectory = binder_hallucination(design_name, target_settings["starting_pdb"], target_settings["chains"],
-                                            target_settings["target_hotspot_residues"], length, seed, helicity_value,
-                                            design_models, advanced_settings, design_paths, failure_csv)
+        if advanced_settings.get("use_antitargets", False) and "antitargets" in target_settings:
+            trajectory = binder_hallucination(design_name, target_settings["starting_pdb"], target_settings["chains"],
+                                                target_settings["target_hotspot_residues"], length, seed, helicity_value,
+                                                design_models, advanced_settings, design_paths, failure_csv,
+                                                antitargets=target_settings["antitargets"],
+                                                antitarget_weight=advanced_settings.get("antitarget_weight", 0.5))
+        else:
+            trajectory = binder_hallucination(design_name, target_settings["starting_pdb"], target_settings["chains"],
+                                                target_settings["target_hotspot_residues"], length, seed, helicity_value,
+                                                design_models, advanced_settings, design_paths, failure_csv)
         trajectory_metrics = copy_dict(trajectory._tmp["best"]["aux"]["log"]) # contains plddt, ptm, i_ptm, pae, i_pae
         trajectory_pdb = os.path.join(design_paths["Trajectory"], design_name + ".pdb")
 
@@ -123,6 +130,13 @@ while True:
 
         # Proceed if there is no trajectory termination signal
         if trajectory.aux["log"]["terminate"] == "":
+            # Save antitarget PDBs
+            if advanced_settings.get("use_antitargets", False) and "antitargets" in target_settings:
+                for i, antitarget in enumerate(target_settings["antitargets"]):
+                    anti_model = trajectory.antitarget_models[i]
+                    sanitized_antitarget = os.path.basename(antitarget).replace(".pdb", "")
+                    anti_pdb_path = os.path.join(design_paths["Trajectory"], f"{design_name}_anti_{sanitized_antitarget}.pdb")
+                    anti_model.save_pdb(anti_pdb_path)
             # Relax binder to calculate statistics
             trajectory_relaxed = os.path.join(design_paths["Trajectory/Relaxed"], design_name + ".pdb")
             pr_relax(trajectory_pdb, trajectory_relaxed)
@@ -149,10 +163,24 @@ while True:
             # target structure RMSD compared to input PDB
             trajectory_target_rmsd = target_pdb_rmsd(trajectory_pdb, target_settings["starting_pdb"], target_settings["chains"])
 
+            # calculate antitarget metrics
+            anti_i_ptm = None
+            anti_i_pae = None
+            if advanced_settings.get("use_antitargets", False) and "antitargets" in target_settings:
+                anti_i_ptm = 0
+                anti_i_pae = 0
+                for anti_model in trajectory.antitarget_models:
+                    anti_model.predict(seq_logits=trajectory.params['seq_logits'], seed=0)
+                    anti_i_ptm += anti_model.aux["log"]["i_ptm"]
+                    anti_i_pae += anti_model.aux["log"]["i_pae"]
+                anti_i_ptm /= len(trajectory.antitarget_models)
+                anti_i_pae /= len(trajectory.antitarget_models)
+
+
             # save trajectory statistics into CSV
             trajectory_data = [design_name, advanced_settings["design_algorithm"], length, seed, helicity_value, target_settings["target_hotspot_residues"], trajectory_sequence, trajectory_interface_residues, 
                                 trajectory_metrics['plddt'], trajectory_metrics['ptm'], trajectory_metrics['i_ptm'], trajectory_metrics['pae'], trajectory_metrics['i_pae'],
-                                trajectory_i_plddt, trajectory_ss_plddt, num_clashes_trajectory, num_clashes_relaxed, trajectory_interface_scores['binder_score'],
+                                trajectory_i_plddt, trajectory_ss_plddt, anti_i_ptm, anti_i_pae, num_clashes_trajectory, num_clashes_relaxed, trajectory_interface_scores['binder_score'],
                                 trajectory_interface_scores['surface_hydrophobicity'], trajectory_interface_scores['interface_sc'], trajectory_interface_scores['interface_packstat'],
                                 trajectory_interface_scores['interface_dG'], trajectory_interface_scores['interface_dSASA'], trajectory_interface_scores['interface_dG_SASA_ratio'],
                                 trajectory_interface_scores['interface_fraction'], trajectory_interface_scores['interface_hydrophobicity'], trajectory_interface_scores['interface_nres'], trajectory_interface_scores['interface_interface_hbonds'],

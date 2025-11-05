@@ -18,14 +18,14 @@ from .pyrosetta_utils import pr_relax, align_pdbs
 from .generic_utils import update_failures
 
 # hallucinate a binder
-def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residues, length, seed, helicity_value, design_models, advanced_settings, design_paths, failure_csv):
+def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residues, length, seed, helicity_value, design_models, advanced_settings, design_paths, failure_csv, antitargets=None, antitarget_weight=0.5):
     model_pdb_path = os.path.join(design_paths["Trajectory"], design_name+".pdb")
 
     # clear GPU memory for new trajectory
     clear_mem()
 
     # initialise binder hallucination model
-    af_model = mk_afdesign_model(protocol="binder", debug=False, data_dir=advanced_settings["af_params_dir"], 
+    af_model = mk_afdesign_model(protocol="binder", debug=False, data_dir=advanced_settings["af_params_dir"],
                                 use_multimer=advanced_settings["use_multimer_design"], num_recycles=advanced_settings["num_recycles_design"],
                                 best_metric='loss')
 
@@ -47,6 +47,41 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
     # redefine intramolecular contacts (con) and intermolecular contacts (i_con) definitions
     af_model.opt["con"].update({"num":advanced_settings["intra_contact_number"],"cutoff":advanced_settings["intra_contact_distance"],"binary":False,"seqsep":9})
     af_model.opt["i_con"].update({"num":advanced_settings["inter_contact_number"],"cutoff":advanced_settings["inter_contact_distance"],"binary":False})
+
+    ### Create antitarget models if specified
+    if antitargets:
+        antitarget_models = []
+        for antitarget_pdb in antitargets:
+            anti_model = mk_afdesign_model(protocol="binder", debug=False, data_dir=advanced_settings["af_params_dir"],
+                                           use_multimer=advanced_settings["use_multimer_design"], num_recycles=advanced_settings["num_recycles_design"])
+            if antitarget_pdb == "self":
+                anti_model.prep_inputs(binder_len=length, chain="A,B",
+                                       rm_target_seq=advanced_settings["rm_template_seq_design"], rm_target_sc=advanced_settings["rm_template_sc_design"])
+            else:
+                anti_model.prep_inputs(pdb_filename=antitarget_pdb, chain=chain, binder_len=length, seed=seed, rm_aa=advanced_settings["omit_AAs"],
+                                       rm_target_seq=advanced_settings["rm_template_seq_design"], rm_target_sc=advanced_settings["rm_template_sc_design"])
+
+            # Share sequence logits
+            anti_model.params['seq_logits'] = af_model.params['seq_logits']
+
+            # Invert inter-chain loss weights
+            weights = copy_dict(af_model.opt["weights"])
+            for k in weights:
+                if k.startswith("i_"):
+                    weights[k] = -weights[k]
+            anti_model.opt["weights"] = weights
+
+            antitarget_models.append(anti_model)
+
+        # Combine losses
+        original_loss_fn = af_model._get_loss
+        def combined_loss_fn(aux):
+            loss = original_loss_fn(aux)
+            for anti_model in antitarget_models:
+                anti_aux = anti_model.predict(seq_logits=af_model.params['seq_logits'], seed=0)
+                loss += antitarget_weight * anti_model._get_loss(anti_aux)["loss"]
+            return loss
+        af_model._get_loss = combined_loss_fn
         
 
     ### additional loss functions
@@ -231,6 +266,11 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
     if advanced_settings["save_trajectory_pickle"]:
         with open(os.path.join(design_paths["Trajectory/Pickle"], design_name+".pickle"), 'wb') as handle:
             pickle.dump(af_model.aux['all'], handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    if 'antitarget_models' in locals():
+        af_model.antitarget_models = antitarget_models
+    else:
+        af_model.antitarget_models = []
 
     return af_model
 
