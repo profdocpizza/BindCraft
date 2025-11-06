@@ -52,12 +52,15 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
     if antitargets:
         antitarget_models = []
         for antitarget_pdb in antitargets:
-            anti_model = mk_afdesign_model(protocol="binder", debug=False, data_dir=advanced_settings["af_params_dir"],
-                                           use_multimer=advanced_settings["use_multimer_design"], num_recycles=advanced_settings["num_recycles_design"])
             if antitarget_pdb == "self":
-                anti_model.prep_inputs(binder_len=length, chain="A,B",
-                                       rm_target_seq=advanced_settings["rm_template_seq_design"], rm_target_sc=advanced_settings["rm_template_sc_design"])
+                anti_model = mk_afdesign_model(protocol="hallucination",
+                                               use_multimer=advanced_settings["use_multimer_design"],
+                                               num_recycles=advanced_settings["num_recycles_design"])
+                anti_model.prep_inputs(length=length, copies=2)
             else:
+                anti_model = mk_afdesign_model(protocol="binder", debug=False, data_dir=advanced_settings["af_params_dir"],
+                                               use_multimer=advanced_settings["use_multimer_design"],
+                                               num_recycles=advanced_settings["num_recycles_design"])
                 anti_model.prep_inputs(pdb_filename=antitarget_pdb, chain=chain, binder_len=length, seed=seed, rm_aa=advanced_settings["omit_AAs"],
                                        rm_target_seq=advanced_settings["rm_template_seq_design"], rm_target_sc=advanced_settings["rm_template_sc_design"])
 
