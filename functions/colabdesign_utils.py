@@ -46,16 +46,17 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
     
     ##### SEQUENCE INSERTION START#############
     sequence_to_insert = advanced_settings.get("sequence_suggestion","") 
-    seq_len = len(sequence_to_insert)
-    key = jax.random.PRNGKey(seed)  # reuse same seed as AF model
-    random_prefix = int(jax.random.randint(key, (1,), 0, length - seq_len)[0])
-    inserted_seq = (
-        "X" * random_prefix +
-        sequence_to_insert +
-        "X" * (length - seq_len - random_prefix)
-    )
-    print("Inserted seq:", inserted_seq)
-    af_model.set_seq(inserted_seq)
+    if sequence_to_insert != "" and sequence_to_insert is not None:
+        seq_len = len(sequence_to_insert)
+        key = jax.random.PRNGKey(seed)  # reuse same seed as AF model
+        random_prefix = int(jax.random.randint(key, (1,), 0, length - seq_len)[0])
+        inserted_seq = (
+            "X" * random_prefix +
+            sequence_to_insert +
+            "X" * (length - seq_len - random_prefix)
+        )
+        print("Inserted seq:", inserted_seq)
+        af_model.set_seq(inserted_seq)
     ##### SEQUENCE INSERTION END#############
 
     # redefine intramolecular contacts (con) and intermolecular contacts (i_con) definitions
@@ -694,7 +695,7 @@ def add_ipsae_loss(model, weight=0.1):
 
 # plot design trajectory losses
 def plot_trajectory(af_model, design_name, design_paths):
-    metrics_to_plot = ['loss', 'plddt', 'ptm', 'i_ptm', 'con', 'i_con', 'pae', 'i_pae', 'rg', 'mpnn']
+    metrics_to_plot = ['loss', 'plddt', 'ptm', 'i_ptm', 'con', 'i_con', 'pae', 'i_pae', 'rg', 'mpnn','ipsae_d0res_score']
     colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
 
     for index, metric in enumerate(metrics_to_plot):
