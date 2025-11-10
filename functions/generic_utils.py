@@ -268,19 +268,6 @@ def load_json_settings(settings_json, filters_json, advanced_json):
 
     return target_settings, advanced_settings, filters
 
-# AF2 model settings, make sure non-overlapping models with template option are being used for design and re-prediction
-def load_af2_models(af_multimer_setting):
-    if af_multimer_setting:
-        design_models = [0,1,2,3,4]
-        prediction_models = [0,1]
-        multimer_validation = False
-    else:
-        design_models = [0,1]
-        prediction_models = [0,1,2,3,4]
-        multimer_validation = True
-
-    return design_models, prediction_models, multimer_validation
-
 # create csv for insertion of data
 def create_dataframe(csv_file, columns):
     if not os.path.exists(csv_file):

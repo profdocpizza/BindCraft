@@ -82,7 +82,8 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
 
     # add ipSAE loss
     add_ipsae_loss(af_model, advanced_settings["weights_ipsae_d0res_asym"])
-
+    add_ipsae_dunbrack_metric(af_model)
+    
     # calculate the number of mutations to do based on the length of the protein
     greedy_tries = math.ceil(length * (advanced_settings["greedy_percentage"] / 100))
 
@@ -302,8 +303,18 @@ def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, 
                     elif comparison == '<=' and prediction_metrics[metric_key] > threshold:
                         pass_af2_filters = False
                         filter_failures[filter_name] = filter_failures.get(filter_name, 0) + 1
-
+            # Print summary of which AF2 filters failed for this binder
+            # Print summary of which AF2 filters failed for this binder
             if not pass_af2_filters:
+                failed_summary = []
+                for f_name, count in filter_failures.items():
+                    threshold = filters.get(f_name, {}).get("threshold")
+                    metric_key = f_name.split('_', 1)[-1].lower()
+                    val = prediction_metrics.get(metric_key)
+                    if val is not None:
+                        failed_summary.append(f"{f_name}: {val:.2f} (threshold {threshold})")
+                if failed_summary:
+                    print(f"AF2 filter failure summary for {mpnn_design_name}: " + "; ".join(failed_summary))
                 break
 
     # Update the CSV file with the failure counts
@@ -692,10 +703,56 @@ def add_ipsae_loss(model, weight=0.1):
     model._callbacks["model"]["loss"].append(loss_fn)
     model.opt["weights"]["ipsae_d0res"] = weight
 
+def add_ipsae_dunbrack_metric(model):
+    """
+    Add the original (non-differentiable) ipSAE metric at fixed thresholds (10,10).
+    This is for monitoring only — it does NOT affect gradients or optimization.
+    """
+    def metric_fn(inputs, outputs):
+        pae = get_pae(outputs)
+        dist_bins = get_dgram_bins(outputs)
+        dist_probs = jax.nn.softmax(outputs["distogram"]["logits"], axis=-1)
+        pred_dist = (dist_probs * dist_bins).sum(-1)
+
+        tL, bL = model._target_len, model._binder_len
+        zeros = jnp.zeros(tL + bL)
+
+        # target = Chn1, binder = Chn2
+        mask_target = zeros.at[:tL].set(1.0)
+        mask_binder = zeros.at[-bL:].set(1.0)
+        mask_2d = mask_target[:, None] * mask_binder[None, :]
+
+        pae_cut = 10.0
+        dist_cut = 10.0
+
+        # --- HARD THRESHOLD version ---
+        pair_mask = mask_2d * (pae < pae_cut) * (pred_dist < dist_cut)
+
+        # avoid zero division
+        n0res_byres = pair_mask.sum(-1) + 1e-8
+
+        # TM-score normalization (same as Dunbrack)
+        def calc_d0(Lres):
+            Lres = jnp.maximum(Lres, 27.0)
+            return jnp.maximum(1.0, 1.24 * (Lres - 15.0) ** (1.0 / 3.0) - 1.8)
+        d0res_byres = calc_d0(n0res_byres)
+
+        # TMscore-style transform
+        ptm_like = 1.0 / (1.0 + (pae / d0res_byres[:, None]) ** 2)
+
+        ipsae_mat = ptm_like * pair_mask
+        ipsae_value = ipsae_mat.sum() / (pair_mask.sum() + 1e-8)
+
+        # Return score directly (no 1 - value)
+        return {"ipsae_dunbrack": ipsae_value}
+
+    # append to model callbacks (not to weighted losses)
+    model._callbacks["model"]["loss"].append(metric_fn)
+
 
 # plot design trajectory losses
 def plot_trajectory(af_model, design_name, design_paths):
-    metrics_to_plot = ['loss', 'plddt', 'ptm', 'i_ptm', 'con', 'i_con', 'pae', 'i_pae', 'rg', 'mpnn','ipsae_d0res_score']
+    metrics_to_plot = ['loss', 'plddt', 'ptm', 'i_ptm', 'con', 'i_con', 'pae', 'i_pae', 'rg', 'mpnn','ipsae_d0res_score','ipsae_dunbrack']
     colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
 
     for index, metric in enumerate(metrics_to_plot):

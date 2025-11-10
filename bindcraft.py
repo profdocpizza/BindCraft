@@ -30,12 +30,25 @@ settings_file = os.path.basename(settings_path).split('.')[0]
 filters_file = os.path.basename(filters_path).split('.')[0]
 advanced_file = os.path.basename(advanced_path).split('.')[0]
 
+
+# AF2 model settings, make sure non-overlapping models with template option are being used for design and re-prediction
+def specify_models(is_multimer):
+    if is_multimer:
+        models = [0,1,2,3,4]
+    else:
+        models = [0,1]
+    return models
+
 ### load AF2 model settings
-design_models, prediction_models, multimer_validation = load_af2_models(advanced_settings["use_multimer_design"])
+design_models = specify_models(is_multimer = advanced_settings["use_multimer_design"])
 
 ### perform checks on advanced_settings
 bindcraft_folder = os.path.dirname(os.path.realpath(__file__))
 advanced_settings = perform_advanced_settings_check(advanced_settings, bindcraft_folder)
+
+
+if advanced_settings["use_multimer_validation_for_complex"]:
+    print("Warning: Using multimer models for validation is not default. It may be more likely to produce false positives than monomer models")
 
 ### generate directories, design path names can be found within the function
 design_paths = generate_directories(target_settings["design_path"])
@@ -201,7 +214,7 @@ while True:
                     clear_mem()
                     # compile complex prediction model
                     complex_prediction_model = mk_afdesign_model(protocol="binder", num_recycles=advanced_settings["num_recycles_validation"], data_dir=advanced_settings["af_params_dir"], 
-                                                                use_multimer=multimer_validation, use_initial_guess=advanced_settings["predict_initial_guess"], use_initial_atom_pos=advanced_settings["predict_bigbang"])
+                                                                use_multimer=advanced_settings["use_multimer_validation_for_complex"], use_initial_guess=advanced_settings["predict_initial_guess"], use_initial_atom_pos=advanced_settings["predict_bigbang"])
                     if advanced_settings["predict_initial_guess"] or advanced_settings["predict_bigbang"]:
                         complex_prediction_model.prep_inputs(pdb_filename=trajectory_pdb, chain='A', binder_chain='B', binder_len=length, use_binder_template=True, rm_target_seq=advanced_settings["rm_template_seq_predict"],
                                                             rm_target_sc=advanced_settings["rm_template_sc_predict"], rm_template_ic=True)
@@ -212,7 +225,7 @@ while True:
                     # compile binder monomer prediction model
                     binder_prediction_model = mk_afdesign_model(protocol="hallucination", use_templates=False, initial_guess=False, 
                                                                 use_initial_atom_pos=False, num_recycles=advanced_settings["num_recycles_validation"], 
-                                                                data_dir=advanced_settings["af_params_dir"], use_multimer=multimer_validation)
+                                                                data_dir=advanced_settings["af_params_dir"], use_multimer=advanced_settings["use_multimer_validation_for_monomer"])
                     binder_prediction_model.prep_inputs(length=length)
 
                     # iterate over designed sequences        
@@ -232,20 +245,21 @@ while True:
                             save_fasta(mpnn_design_name, mpnn_sequence['seq'], design_paths)
                         
                         ### Predict mpnn redesigned binder complex using masked templates
+                        validation_models_complex = specify_models(is_multimer=advanced_settings["use_multimer_validation_for_complex"])
                         mpnn_complex_statistics, pass_af2_filters = predict_binder_complex(complex_prediction_model,
                                                                                         mpnn_sequence['seq'], mpnn_design_name,
                                                                                         target_settings["starting_pdb"], target_settings["chains"],
-                                                                                        length, trajectory_pdb, prediction_models, advanced_settings,
+                                                                                        length, trajectory_pdb, validation_models_complex, advanced_settings,
                                                                                         filters, design_paths, failure_csv)
 
                         # if AF2 filters are not passed then skip the scoring
                         if not pass_af2_filters:
-                            print(f"Base AF2 filters not passed for {mpnn_design_name}, skipping interface scoring")
+                            print(f"Base AF2 (multimer={advanced_settings['use_multimer_validation_for_complex']}) filters not passed for {mpnn_design_name}, skipping interface scoring")
                             mpnn_n += 1
                             continue
 
                         # calculate statistics for each model individually
-                        for model_num in prediction_models:
+                        for model_num in validation_models_complex:
                             mpnn_design_pdb = os.path.join(design_paths["MPNN"], f"{mpnn_design_name}_model{model_num+1}.pdb")
                             mpnn_design_relaxed = os.path.join(design_paths["MPNN/Relaxed"], f"{mpnn_design_name}_model{model_num+1}.pdb")
 
@@ -305,11 +319,12 @@ while True:
                         mpnn_complex_averages = calculate_averages(mpnn_complex_statistics, handle_aa=True)
                         
                         ### Predict binder alone in single sequence mode
+                        validation_models_monomer = specify_models(is_multimer=advanced_settings["use_multimer_validation_for_monomer"])
                         binder_statistics = predict_binder_alone(binder_prediction_model, mpnn_sequence['seq'], mpnn_design_name, length,
-                                                                trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths)
+                                                                trajectory_pdb, binder_chain, validation_models_monomer, advanced_settings, design_paths)
 
                         # extract RMSDs of binder to the original trajectory
-                        for model_num in prediction_models:
+                        for model_num in validation_models_monomer:
                             mpnn_binder_pdb = os.path.join(design_paths["MPNN/Binder"], f"{mpnn_design_name}_model{model_num+1}.pdb")
 
                             if os.path.exists(mpnn_binder_pdb):
@@ -403,7 +418,23 @@ while True:
                                     shutil.copy(source_plot, target_plot)
 
                         else:
-                            print(f"Unmet filter conditions for {mpnn_design_name}")
+                            mpnn_dict = {label: value for label, value in zip(design_labels, mpnn_data)}
+                            failed_details = []
+                            for metric in filter_conditions:
+                                if metric in filters and filters[metric]["threshold"] is not None:
+                                    val = mpnn_dict.get(metric)
+                                    if isinstance(val, float):
+                                        val_str = f"{val:.2f}"
+                                    else:
+                                        val_str = str(val)
+                                    failed_details.append(f"{metric}: {val_str} (thr {filters[metric]['threshold']})")
+
+                            print(
+                                f"Unmet filter conditions for {mpnn_design_name} — "
+                                + ", ".join(failed_details)
+                                + f" — AF2 {'Multimer' if advanced_settings['use_multimer_validation_for_monomer'] else 'Monomer'} validation"
+                            )
+
                             failure_df = pd.read_csv(failure_csv)
                             special_prefixes = ('Average_', '1_', '2_', '3_', '4_', '5_')
                             incremented_columns = set()
